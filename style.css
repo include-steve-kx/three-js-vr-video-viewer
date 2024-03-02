@@ -1,3 +1,20 @@
 body {
     margin: 0;
+    overflow: hidden;
+}
+
+#blur-bg {
+    position: fixed;
+    left: 0;
+    top: 0;
+    width: 100vw;
+    height: 100vh;
+    backdrop-filter: blur(4px);
+}
+
+#start-video-button {
+    position: fixed;
+    left: 50vw;
+    top: 50vh;
+    transform: translate(-50%, -50%);
 }

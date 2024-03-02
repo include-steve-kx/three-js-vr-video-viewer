@@ -101,5 +101,15 @@ function render() {
     renderer.render(scene, camera);
 }
 
-init();
-animate();
+// function to request access to device orientation events
+let blurBg = document.getElementById('blur-bg');
+let startVideoButton = document.getElementById('start-video-button');
+function setup() {
+    startVideoButton.addEventListener('click', () => {
+        blurBg.style.display = 'none';
+        startVideoButton.style.display = 'none';
+        init();
+        animate();
+    })
+}
+setup();
