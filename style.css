@@ -1,6 +1,8 @@
 body {
     margin: 0;
     overflow: hidden;
+
+    background-color: #1a1a1a;
 }
 
 #blur-bg {
@@ -17,4 +19,25 @@ body {
     left: 50vw;
     top: 50vh;
     transform: translate(-50%, -50%);
+}
+
+#rectangle-360-container {
+    position: absolute;
+    left: 50%;
+    top: 0;
+    width: calc(clamp(400px, 100vw, 1200px));
+    transform: translateX(-50%);
+    height: 30vh;
+
+    background-color: #1a1a1a;
+}
+
+#sphere-360-container {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    width: 100vw;
+    height: 65vh;
+    
+    background-color: #1a1a1a;
 }
