@@ -137,6 +137,24 @@ function setupEventListeners() {
                     isVideoPlaying = true;
                 }
             }
+        } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+            const videoSources = [
+                'static/PBIBS_114/114_circle.mp4',
+                // 'static/PBIBS_114/114_ellipse.mp4'
+                'static/PBIBS_114/114_circle_stretched.mp4'
+            ];
+            const currentSrc = video.currentSrc;
+            const currentIndex = videoSources.findIndex(src => currentSrc.endsWith(src));
+            let newIndex;
+            if (e.key === 'ArrowLeft') {
+                newIndex = currentIndex <= 0 ? videoSources.length - 1 : currentIndex - 1;
+            } else {
+                newIndex = currentIndex >= videoSources.length - 1 ? 0 : currentIndex + 1;
+            }
+            video.src = videoSources[newIndex];
+            console.log(`Currently playing: ${video.src}`);
+            video.play();
+            isVideoPlaying = true;
         }
     })
 }
