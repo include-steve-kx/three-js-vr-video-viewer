@@ -249,7 +249,67 @@ export const fsSphereVideoStrip = `
     }
 `;
 
-export const fsSphereFishEye = `
+export const fsSphereEquidistant = `
+    uniform sampler2D uTexture; // Fisheye video texture.
+    uniform float uFOV;         // Horizontal FOV in radians (e.g., PI for 180°).
+    varying vec2 vUv;           // Varying UV from SphereGeometry.
+
+    const float PI = 3.141592653589793;
+
+    void main() {
+        // Convert sphere UV to spherical coordinates.
+        // vUv.x maps to azimuth (θ), vUv.y maps to polar angle (φ).
+        float theta = vUv.x * (2.0 * PI);      // azimuthal angle, [0, 2PI]
+        float phi = PI * (1.0 - vUv.y);          // polar angle, with vUv.y=1 at north (φ=0) and vUv.y=0 at south (φ=PI)
+
+        // Convert spherical coordinates to a 3D direction vector.
+        vec3 dir = vec3(
+            sin(phi) * cos(theta),  // x
+            cos(phi),               // y
+            sin(phi) * sin(theta)   // z
+        );
+        
+        // The camera (fisheye) optical axis (pointing downward).
+        vec3 camDir = vec3(0.0, -1.0, 0.0);
+        
+        // Compute the angle between the current direction and the camera optical axis.
+        float angle = acos(clamp(dot(dir, camDir), -1.0, 1.0));
+        
+        // Compute the effective focal length (f) for the equidistant model.
+        // We assume that the valid fisheye circle is centered at (0.5, 0.5) with radius 0.5.
+        // At maximum valid angle (uFOV/2) we want r = 0.5.
+        float f = 0.5 / (uFOV * 0.5); // This simplifies to: f = 1.0 / uFOV.
+        float r = f * angle;          // Equidistant mapping: r = f * θ.
+        
+        // If the angle is larger than half the FOV, the pixel is not captured by the camera.
+        if (angle > (uFOV * 0.5)) {
+            gl_FragColor = vec4(0.0); // Black for regions not captured.
+            return;
+        }
+        
+        // Compute the 2D direction for the fisheye texture sample.
+        // Project the 3D direction onto the image plane perpendicular to the camera optical axis.
+        vec2 fisheyeUV;
+        if (angle < 1e-5) {
+            // At the center, avoid dividing by zero.
+            fisheyeUV = vec2(0.5, 0.5);
+        } else {
+            vec3 proj = normalize(dir - dot(dir, camDir) * camDir);
+            // Map the projected vector to texture space.
+            // Here, proj.x and proj.z form the 2D coordinates on the camera's image plane.
+            fisheyeUV = vec2(0.5) + r * vec2(proj.x, proj.z);
+        }
+        
+        // Optional: Clamp coordinates. If the computed UV falls outside the valid region, output black.
+        if (fisheyeUV.x < 0.0 || fisheyeUV.x > 1.0 || fisheyeUV.y < 0.0 || fisheyeUV.y > 1.0) {
+            gl_FragColor = vec4(0.0);
+        } else {
+            gl_FragColor = texture2D(uTexture, fisheyeUV);
+        }
+    }
+`;
+
+export const fsSphereFishEyeNew = `
     ${commonShader}
     #define PI 3.14159
 
@@ -257,21 +317,40 @@ export const fsSphereFishEye = `
 
     uniform float exp1;
     uniform float exp2;
+    uniform float lookoutCameraFOV;
 
-    uniform float xOffset;
-    uniform float yOffset;
+    uniform float yawCorrection; // y
+    uniform float pitchCorrection; // x
+    uniform float rollCorrection; // z
+
+    uniform float yawIMU; // y
+    uniform float pitchIMU; // x
+    uniform float rollIMU; // z
 
     uniform sampler2D map;
 
     uniform bool displayMap;
+    uniform bool IMUCorrection;
+    uniform bool IMURealtimeInverse;
 
-    vec2 rotateUV (vec2 originalUV, float xOffset, float yOffset) {
+    struct Bbox {
+        float x;
+        float y;
+        float width;
+        float height;
+    };
+    uniform Bbox bbox;
+
+    vec2 rotateUV (vec2 originalUV, float yawIMU, float pitchIMU, float rollIMU) {
         // Input: originalUV (vec2) in [0,1]x[0,1]
         // horizontalRotationAngle: angle in radians ([-PI, PI]) defining the arbitrary axis in the x-z plane (0 = x-axis)
         // rotationAngle: rotation amount around that axis (in radians)
 
-        float horizontalRotationAngle = xOffset * PI / 180.; // provided
-        float rotationAngle = yOffset * PI / 180.; // provided
+        // // discard yaw (heading) IMU data for now
+        // float yaw = (yawIMU + (IMUCorrection ? yawCorrection : 0.)) * PI / 180.;
+        float yaw = (yawIMU + (IMUCorrection ? yawCorrection : 0.)) * PI / 180.;
+        float pitch = (pitchIMU + (IMUCorrection ? pitchCorrection : 0.)) * PI / 180.;
+        float roll = (rollIMU + (IMUCorrection ? rollCorrection : 0.)) * PI / 180.;
 
         // Convert original UV to spherical coordinates:
         float origTheta = originalUV.x * (2.0 * PI);
@@ -283,32 +362,224 @@ export const fsSphereFishEye = `
         pos.y = cos(origPhi);
         pos.z = sin(origPhi) * sin(origTheta);
 
-        // Precompute sine and cosine for the horizontal rotation angle:
-        float cosH = cos(horizontalRotationAngle);
-        float sinH = sin(horizontalRotationAngle);
-
-        // Rotation matrices around the y-axis for alignment:
-        mat3 Ry_neg = mat3(
-            cosH,  0.0, -sinH,
-            0.0,   1.0,  0.0,
-            sinH,  0.0,  cosH
-        );
-        mat3 Ry_pos = mat3(
-            cosH,  0.0, sinH,
-            0.0,   1.0, 0.0,
-            -sinH,  0.0, cosH
+        mat3 Ry = mat3(
+            cos(yaw), 0.0, -sin(yaw),
+            0.0,      1.0,       0.0,
+            sin(yaw), 0.0,   cos(yaw)
         );
 
-        // Rotation matrix for rotation around the x-axis:
         mat3 Rx = mat3(
-            1.0,              0.0,               0.0,
-            0.0, cos(rotationAngle), -sin(rotationAngle),
-            0.0, sin(rotationAngle),  cos(rotationAngle)
+            1.0,      0.0,      0.0,
+            0.0, cos(pitch), -sin(pitch),
+            0.0, sin(pitch),  cos(pitch)
         );
+
+        mat3 Rz = mat3(
+            cos(roll), -sin(roll), 0.0,
+            sin(roll), cos(roll),  0.0,   
+            0.0,        0.0,         1.0
+        );
+
+        // mat3 Rot = inverse(Rz * Rx * Ry);
+        mat3 Rot = IMURealtimeInverse ? inverse(Rz * Rx * Ry) : Rz * Rx * Ry;
+        // mat3 Rot = Rz * Rx * Ry;
 
         // Compose the rotations:
-        // First, align the arbitrary axis with x-axis, then rotate about x, then undo the alignment.
-        vec3 rotatedPos = Ry_pos * Rx * Ry_neg * pos;
+        vec3 rotatedPos = Rot * pos;
+
+        // Convert rotated position back to spherical coordinates:
+        float newPhi   = acos(clamp(rotatedPos.y, -1.0, 1.0));
+        float newTheta = atan(rotatedPos.z, rotatedPos.x); // returns (-PI, PI]
+
+        // Normalize newTheta to [0, 2PI]:
+        if(newTheta < 0.0) {
+            newTheta += 2.0 * PI;
+        }
+
+        // Map back to UV coordinates:
+        vec2 newUV;
+        newUV.x = newTheta / (2.0 * PI);
+        newUV.y = 1.0 - (newPhi / PI);
+
+        return newUV;
+    }
+
+    vec2 fisheyeEquidistantProjection(vec2 uv) {
+        // Convert sphere UV to spherical coordinates.
+        // vUv.x maps to azimuth (θ), vUv.y maps to polar angle (φ).
+        float theta = uv.x * (2.0 * PI);      // azimuthal angle, [0, 2PI]
+        float phi = PI * (1.0 - uv.y);          // polar angle, with vUv.y=1 at north (φ=0) and vUv.y=0 at south (φ=PI)
+
+        // Convert spherical coordinates to a 3D direction vector.
+        vec3 dir = vec3(
+            sin(phi) * cos(theta),  // x
+            cos(phi),               // y
+            sin(phi) * sin(theta)   // z
+        );
+        
+        // The camera (fisheye) optical axis (pointing downward).
+        vec3 camDir = vec3(0.0, -1.0, 0.0);
+        
+        // Compute the angle between the current direction and the camera optical axis.
+        float angle = acos(clamp(dot(dir, camDir), -1.0, 1.0));
+        
+        // Compute the effective focal length (f) for the equidistant model.
+        // We assume that the valid fisheye circle is centered at (0.5, 0.5) with radius 0.5.
+        // At maximum valid angle (uFOV/2) we want r = 0.5.
+        float uFOV = lookoutCameraFOV * PI / 180.;
+        float f = 0.5 / (uFOV * 0.5); // This simplifies to: f = 1.0 / uFOV.
+        float r = f * angle;          // Equidistant mapping: r = f * θ.
+        
+        // If the angle is larger than half the FOV, the pixel is not captured by the camera.
+        if (angle > (uFOV * 0.5)) {
+            gl_FragColor = vec4(0.0); // Black for regions not captured.
+            return vec2(-1., -1.);
+        }
+        
+        // Compute the 2D direction for the fisheye texture sample.
+        // Project the 3D direction onto the image plane perpendicular to the camera optical axis.
+        vec2 fisheyeUV;
+        if (angle < 1e-5) {
+            // At the center, avoid dividing by zero.
+            fisheyeUV = vec2(0.5, 0.5);
+        } else {
+            vec3 proj = normalize(dir - dot(dir, camDir) * camDir);
+            // Map the projected vector to texture space.
+            // Here, proj.x and proj.z form the 2D coordinates on the camera's image plane.
+            fisheyeUV = vec2(0.5) + r * vec2(proj.x, proj.z);
+        }
+
+        return fisheyeUV;
+    }
+
+    vec3 highlightCVDetection(vec2 fisheyeUV) {
+        // my input is always sphere UV
+        // I have to map it to fisheye UV, check if the UV is within the detection bounding box range
+        // if true, then we color this particular part of UV to a bounding box color
+        // Remap the fisheye UV from [0,1] range to texture dimensions
+
+        // if (bbox.y > 0.) {
+        //     return vec3(1., 0., 0.);
+        // } else {
+        //     return vec3(0., 0., 0.);
+        // }
+
+        // bbox x & y at top left corner, w.r.t the top left corner of the texture, width & height
+        vec2 topLeftCornerUV = vec2(0.);
+        topLeftCornerUV.x = remap(bbox.x, 0., 1920., 0., 1.);
+        topLeftCornerUV.y = remap(bbox.y, 0., 1080., 1., 0.);
+        vec2 size = vec2(bbox.width / 1920., bbox.height / 1080.);
+        
+        vec3 col = vec3(0.);
+
+        // if ((fisheyeUV.x > topLeftCornerUV.x) && (fisheyeUV.x < topLeftCornerUV.x + size.x) && (fisheyeUV.y > topLeftCornerUV.y) && (fisheyeUV.y < topLeftCornerUV.y + size.y)) {
+        //     col = vec3(1., 0., 0.);
+        // }
+        if ((fisheyeUV.x > topLeftCornerUV.x) && (fisheyeUV.x < topLeftCornerUV.x + size.x) && (fisheyeUV.y > topLeftCornerUV.y - size.y) && (fisheyeUV.y < topLeftCornerUV.y)) {
+            // col = vec3(1., 0., 0.);
+            
+            col.r = mix(0., 1., remap01(fisheyeUV.x, topLeftCornerUV.x - size.x / 2., topLeftCornerUV.x + size.x / 2.));
+            col.g = mix(0., 1., remap01(fisheyeUV.y, topLeftCornerUV.y - size.y / 2., topLeftCornerUV.y + size.y / 2.));
+        }
+
+        return col;
+    }
+
+    void main() {
+        float alpha = 1.;
+        vec3 col = vec3(0.);
+
+        vec2 uv = vUv;
+
+        // step 1: rotate UV
+        uv = rotateUV(uv, yawIMU, pitchIMU, rollIMU);
+
+
+        // --------- step 2: equidistant mapping ----------- //
+        vec2 fisheyeUV = fisheyeEquidistantProjection(uv);
+
+        // --------- step 3: mark the CV detection ----------- //
+        vec3 cvHighlight = highlightCVDetection(fisheyeUV);
+
+        
+        // Optional: Clamp coordinates. If the computed UV falls outside the valid region, output black.
+        if (fisheyeUV.x < 0.0 || fisheyeUV.x > 1.0 || fisheyeUV.y < 0.0 || fisheyeUV.y > 1.0) {
+            gl_FragColor = vec4(0.0);
+        } else {
+            col = texture2D(map, fisheyeUV).rgb;
+            col += cvHighlight;
+            gl_FragColor = vec4(col, alpha);
+        }
+    }
+`;
+
+export const fsSphereFishEye = `
+    ${commonShader}
+    #define PI 3.14159
+
+    varying vec2 vUv;
+
+    uniform float exp1;
+    uniform float exp2;
+
+    uniform float yawCorrection; // y
+    uniform float pitchCorrection; // x
+    uniform float rollCorrection; // z
+
+    uniform float yawIMU; // y
+    uniform float pitchIMU; // x
+    uniform float rollIMU; // z
+
+    uniform sampler2D map;
+
+    uniform bool displayMap;
+    uniform bool IMUCorrection;
+    uniform bool IMURealtimeInverse;
+
+    vec2 rotateUV (vec2 originalUV, float yawIMU, float pitchIMU, float rollIMU) {
+        // Input: originalUV (vec2) in [0,1]x[0,1]
+        // horizontalRotationAngle: angle in radians ([-PI, PI]) defining the arbitrary axis in the x-z plane (0 = x-axis)
+        // rotationAngle: rotation amount around that axis (in radians)
+
+        // // discard yaw (heading) IMU data for now
+        // float yaw = (yawIMU + (IMUCorrection ? yawCorrection : 0.)) * PI / 180.;
+        float yaw = (0. + (IMUCorrection ? yawCorrection : 0.)) * PI / 180.;
+        float pitch = (pitchIMU + (IMUCorrection ? pitchCorrection : 0.)) * PI / 180.;
+        float roll = (rollIMU + (IMUCorrection ? rollCorrection : 0.)) * PI / 180.;
+
+        // Convert original UV to spherical coordinates:
+        float origTheta = originalUV.x * (2.0 * PI);
+        float origPhi   = PI * (1.0 - originalUV.y); // since v = 1 -> φ = 0, v = 0 -> φ = PI
+
+        // Convert spherical coordinates to a 3D unit sphere position:
+        vec3 pos;
+        pos.x = sin(origPhi) * cos(origTheta);
+        pos.y = cos(origPhi);
+        pos.z = sin(origPhi) * sin(origTheta);
+
+        mat3 Ry = mat3(
+            cos(yaw), 0.0, -sin(yaw),
+            0.0,      1.0,       0.0,
+            sin(yaw), 0.0,   cos(yaw)
+        );
+
+        mat3 Rx = mat3(
+            1.0,      0.0,      0.0,
+            0.0, cos(pitch), -sin(pitch),
+            0.0, sin(pitch),  cos(pitch)
+        );
+
+        mat3 Rz = mat3(
+            cos(roll), -sin(roll), 0.0,
+            sin(roll), cos(roll),  0.0,   
+            0.0,        0.0,         1.0
+        );
+
+        // mat3 Rot = inverse(Rz * Rx * Ry);
+        mat3 Rot = IMURealtimeInverse ? inverse(Rz * Rx * Ry) : Rz * Rx * Ry;
+
+        // Compose the rotations:
+        vec3 rotatedPos = Rot * pos;
 
         // Convert rotated position back to spherical coordinates:
         float newPhi   = acos(clamp(rotatedPos.y, -1.0, 1.0));
@@ -334,9 +605,10 @@ export const fsSphereFishEye = `
         vec2 uv = vUv;
 
         // step 1: rotate UV
-        uv = rotateUV(uv, xOffset, yOffset);
+        uv = rotateUV(uv, yawIMU, pitchIMU, rollIMU);
 
         // step 2: stretch UV
+        // uv.y = pow(uv.y, exp1);
         uv.y = -pow(1. - uv.y, exp2) + 1.;
 
         vec2 oldUV = uv;
@@ -353,7 +625,8 @@ export const fsSphereFishEye = `
         if (displayMap) {
             col = texture(map, newUV).rgb;
         } else {
-            col = vec3(0., oldUV.y, 0.);
+            // col = vec3(0., oldUV.y, 0.);
+            col = vec3(oldUV.x, oldUV.y, 0.);
 
             float section = 20.;
             if (fract(oldUV.y * section) < 0.05) col = vec3(1.);
@@ -383,22 +656,33 @@ export const fsRectangle = `
     uniform float exp1;
     uniform float exp2;
 
-    uniform float xOffset;
-    uniform float yOffset;
+    uniform float yawCorrection; // y
+    uniform float pitchCorrection; // x
+    uniform float rollCorrection; // z
+
+    uniform float yawIMU; // y
+    uniform float pitchIMU; // x
+    uniform float rollIMU; // z
 
     uniform sampler2D map;
+
+    uniform bool IMUCorrection;
+    uniform bool IMURealtimeInverse;
 
     uniform float vFov; // vertical FOV
     uniform float aspectRatio; // width / height
     uniform vec3 cameraDirection; // sphere 360 camera world space direction
 
-    vec2 rotateUV (vec2 originalUV, float xOffset, float yOffset) {
+    vec2 rotateUV (vec2 originalUV, float yawIMU, float pitchIMU, float rollIMU) {
         // Input: originalUV (vec2) in [0,1]x[0,1]
         // horizontalRotationAngle: angle in radians ([-PI, PI]) defining the arbitrary axis in the x-z plane (0 = x-axis)
         // rotationAngle: rotation amount around that axis (in radians)
 
-        float horizontalRotationAngle = xOffset * PI / 180.; // provided
-        float rotationAngle = yOffset * PI / 180.; // provided
+        // // discard yaw (heading) IMU data for now
+        // float yaw = (yawIMU + (IMUCorrection ? yawCorrection : 0.)) * PI / 180.;
+        float yaw = (0. + (IMUCorrection ? yawCorrection : 0.)) * PI / 180.;
+        float pitch = (pitchIMU + (IMUCorrection ? pitchCorrection : 0.)) * PI / 180.;
+        float roll = (rollIMU + (IMUCorrection ? rollCorrection : 0.)) * PI / 180.;
 
         // Convert original UV to spherical coordinates:
         float origTheta = originalUV.x * (2.0 * PI);
@@ -410,32 +694,31 @@ export const fsRectangle = `
         pos.y = cos(origPhi);
         pos.z = sin(origPhi) * sin(origTheta);
 
-        // Precompute sine and cosine for the horizontal rotation angle:
-        float cosH = cos(horizontalRotationAngle);
-        float sinH = sin(horizontalRotationAngle);
 
-        // Rotation matrices around the y-axis for alignment:
-        mat3 Ry_neg = mat3(
-            cosH,  0.0, -sinH,
-            0.0,   1.0,  0.0,
-            sinH,  0.0,  cosH
-        );
-        mat3 Ry_pos = mat3(
-            cosH,  0.0, sinH,
-            0.0,   1.0, 0.0,
-            -sinH,  0.0, cosH
+        
+        mat3 Ry = mat3(
+            cos(yaw), 0.0, -sin(yaw),
+            0.0,      1.0,       0.0,
+            sin(yaw), 0.0,   cos(yaw)
         );
 
-        // Rotation matrix for rotation around the x-axis:
         mat3 Rx = mat3(
-            1.0,              0.0,               0.0,
-            0.0, cos(rotationAngle), -sin(rotationAngle),
-            0.0, sin(rotationAngle),  cos(rotationAngle)
+            1.0,      0.0,      0.0,
+            0.0, cos(pitch), -sin(pitch),
+            0.0, sin(pitch),  cos(pitch)
         );
+
+        mat3 Rz = mat3(
+            cos(roll), -sin(roll), 0.0,
+            sin(roll), cos(roll),  0.0,   
+            0.0,        0.0,         1.0
+        );
+
+        // mat3 Rot = inverse(Rz * Rx * Ry);
+        mat3 Rot = IMURealtimeInverse ? inverse(Rz * Rx * Ry) : Rz * Rx * Ry;
 
         // Compose the rotations:
-        // First, align the arbitrary axis with x-axis, then rotate about x, then undo the alignment.
-        vec3 rotatedPos = Ry_pos * Rx * Ry_neg * pos;
+        vec3 rotatedPos = Rot * pos;
 
         // Convert rotated position back to spherical coordinates:
         float newPhi   = acos(clamp(rotatedPos.y, -1.0, 1.0));
@@ -503,9 +786,10 @@ export const fsRectangle = `
         }
 
         // step 1: rotate UV
-        uv = rotateUV(uv, xOffset, yOffset);
+        uv = rotateUV(uv, yawIMU, pitchIMU, rollIMU);
 
         // step 2: stretch UV
+        // uv.y = pow(uv.y, exp1);
         uv.y = -pow(1. - uv.y, exp2) + 1.;
 
         // step 3: convert sphere UV --> texture's cartesian coordinates
